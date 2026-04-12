@@ -6,7 +6,7 @@
       "phases": {
         "install": {
           "dependsOn": ["setup"],
-          "cmds": ["npm ci --omit=dev"]
+          "cmds": ["npm install --omit=dev"]
         }
       }
     }

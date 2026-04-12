@@ -8,7 +8,7 @@
     "dev": "nodemon web/server.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.9",
+    "@whiskeysockets/baileys": "^6.7.18",
     "firebase-admin": "^12.0.0",
     "express": "^4.18.2",
     "express-session": "^1.17.3",

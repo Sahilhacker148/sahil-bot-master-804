@@ -112,8 +112,6 @@ async function startBot(
     syncFullHistory:                false,
     generateHighQualityLinkPreview: true,
     shouldIgnoreJid:                jid => isJidBroadcast(jid),
-    // v7: enable tctoken support to avoid 463 error
-    ...(typeof sock?.generateTcToken === 'function' ? {} : {}),
   });
 
   // Save socket reference for clean shutdown
@@ -385,4 +383,3 @@ function _cleanup(sessionId) {
 }
 
 module.exports = { startBot, stopBot };
-      

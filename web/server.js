@@ -27,17 +27,16 @@ const {
   getActiveAnnouncement, createAnnouncement, deactivateAnnouncement,
 } = require('../src/firebase/config');
 const { startBot, stopBot } = require('../src/bot/launcher');
-// NOTE: src/utils/firebase.js (Realtime DB) removed — app uses Firestore via src/firebase/config.js
 
 const app    = express();
 const server = http.createServer(app);
 const wss    = new WebSocketServer({ server });
 
 // ─── SECURITY MIDDLEWARE ──────────────────────────────────
-app.set('trust proxy', 1); // needed when behind Railway / Nginx proxy
+app.set('trust proxy', 1);
 
 app.use(helmet({
-  contentSecurityPolicy: false,      // relaxed for dashboard inline scripts
+  contentSecurityPolicy: false,
   crossOriginEmbedderPolicy: false,
 }));
 app.use(express.json({ limit: '10mb' }));
@@ -71,14 +70,14 @@ app.use((req, res, next) => {
 });
 
 // ─── QR WEBSOCKET ──────────────────────────────────────────
-const qrClients      = new Map(); // sessionId -> ws
-const pendingWsMsgs  = new Map(); // sessionId -> buffered messages (pair code race fix)
+const qrClients      = new Map(); 
+const pendingWsMsgs  = new Map(); 
 
 wss.on('connection', (ws, req) => {
   const sid = new URL(req.url, 'http://x').searchParams.get('sessionId');
   if (sid) {
     qrClients.set(sid, ws);
-    // FIX: flush any messages that arrived before WS connected (pair code race condition)
+    // Flush buffered messages
     const buffered = pendingWsMsgs.get(sid) || [];
     buffered.forEach(msg => {
       try { ws.send(JSON.stringify(msg)); } catch (_) {}
@@ -94,10 +93,9 @@ function wsSend(sessionId, data) {
   if (ws && ws.readyState === 1) {
     try { ws.send(JSON.stringify(data)); } catch (_) {}
   } else {
-    // FIX: buffer message — client not connected yet (pair code race condition)
+    // Buffer if client not ready
     if (!pendingWsMsgs.has(sessionId)) pendingWsMsgs.set(sessionId, []);
     pendingWsMsgs.get(sessionId).push(data);
-    // Auto-clear buffer after 2 minutes to prevent memory leak
     setTimeout(() => pendingWsMsgs.delete(sessionId), 120_000);
   }
 }
@@ -106,8 +104,6 @@ function wsSend(sessionId, data) {
 app.post('/api/auth/register', async (req, res) => {
   try {
     const { name, email, whatsapp, password } = req.body;
-
-    // BUG FIX: validate all fields with proper validators
     if (!name || !email || !whatsapp || !password)
       return res.status(400).json({ error: 'All fields are required.' });
     if (name.trim().length < 2)
@@ -139,7 +135,6 @@ app.post('/api/auth/login', async (req, res) => {
     if (!email || !password) return res.status(400).json({ error: 'Email and password are required.' });
 
     const user = await getUserByEmail(email.toLowerCase().trim());
-    // BUG FIX: use generic error for non-existent user (prevents user enumeration)
     if (!user) return res.status(401).json({ error: 'Invalid email or password.' });
     if (user.status === 'pending')  return res.status(403).json({ error: 'Your account is pending admin approval.' });
     if (user.status === 'rejected') return res.status(403).json({ error: 'Your account has been rejected. Contact support.' });
@@ -166,7 +161,6 @@ app.post('/api/auth/admin-login', async (req, res) => {
       req.session.userId  = 'admin';
       return res.json({ success: true, redirect: '/admin.html' });
     }
-    // BUG FIX: use 401 not 200 for auth failures
     res.status(401).json({ error: 'Invalid admin credentials.' });
   } catch (err) {
     logger.error('Admin login error:', err.message);
@@ -201,8 +195,6 @@ app.get('/api/user/subscription', isAuth, async (req, res) => {
   }
 });
 
-
-// ─── ADDED: User status route (uses firebase realtime DB) ─
 app.get("/api/user/status", async (req, res) => {
   if (!req.session.userId) return res.json({ success: false, error: "Not logged in." });
   try {
@@ -214,6 +206,7 @@ app.get("/api/user/status", async (req, res) => {
     res.status(500).json({ success: false, error: "Server error." });
   }
 });
+
 app.get('/api/user/bots', isAuth, async (req, res) => {
   try {
     const sessions  = await getSessionsByUser(req.session.userId);
@@ -237,22 +230,52 @@ app.get('/api/announcement', async (req, res) => {
   }
 });
 
-// ─── BOT ROUTES ───────────────────────────────────────────
+// ─── BOT ROUTES (FIXED) ───────────────────────────────────────
+// FIX: Helper function to save session to DB before starting bot
+async function initAndStartBot(sessionId, userId, phoneNumber = null) {
+  // 1. Save to Firestore FIRST
+  await createSession(sessionId, userId, {
+    status: 'connecting',
+    createdAt: new Date().toISOString(),
+    phoneNumber: phoneNumber || null
+  });
+
+  // 2. Start the bot logic
+  startBot(
+    sessionId, 
+    userId,
+    async (qr) => {
+      // QR Callback
+      const qrImage = await QRCode.toDataURL(qr);
+      wsSend(sessionId, { type: 'qr', qr: qrImage, sessionId });
+    },
+    (code) => {
+      // Pair Code Callback
+      wsSend(sessionId, { type: 'pairCode', code, sessionId });
+    },
+    async (sid, number) => {
+      // Connected Callback
+      wsSend(sid, { type: 'connected', sessionId: sid, number });
+      // Update DB status
+      await updateSession(sid, { status: 'active', number: number });
+    },
+    async (sid) => {
+      // Disconnected Callback
+      wsSend(sid, { type: 'disconnected', sessionId: sid });
+      await updateSession(sid, { status: 'disconnected' });
+    },
+    phoneNumber
+  ).catch(err => logger.error('Bot start error:', err.message));
+}
+
 app.post('/api/bot/start-qr', isAuth, isPaid, async (req, res) => {
   try {
     const sessionId = generateSessionId();
     res.json({ success: true, sessionId });
-
-    startBot(
-      sessionId, req.session.userId,
-      async (qr) => {
-        const qrImage = await QRCode.toDataURL(qr);
-        wsSend(sessionId, { type: 'qr', qr: qrImage, sessionId });
-      },
-      null,
-      (sid, number) => wsSend(sid, { type: 'connected', sessionId: sid, number }),
-      (sid) => wsSend(sid, { type: 'disconnected', sessionId: sid }),
-    ).catch(err => logger.error('Bot QR start error:', err.message));
+    
+    // Use helper to save session then start
+    await initAndStartBot(sessionId, req.session.userId);
+    
   } catch (err) {
     logger.error('start-qr error:', err.message);
     res.status(500).json({ error: 'Failed to start bot.' });
@@ -263,21 +286,19 @@ app.post('/api/bot/start-pair', isAuth, isPaid, async (req, res) => {
   try {
     const { phoneNumber } = req.body;
     if (!phoneNumber) return res.status(400).json({ error: 'Phone number is required.' });
+    
+    // Clean number
     const cleanNum = phoneNumber.replace(/[^0-9]/g, '');
     if (cleanNum.length < 10) return res.status(400).json({ error: 'Invalid phone number.' });
 
     const sessionId = generateSessionId();
-
-    startBot(
-      sessionId, req.session.userId,
-      null,
-      (code) => wsSend(sessionId, { type: 'pairCode', code, sessionId }),
-      (sid, number) => wsSend(sid, { type: 'connected', sessionId: sid, number }),
-      (sid) => wsSend(sid, { type: 'disconnected', sessionId: sid }),
-      phoneNumber,
-    ).catch(err => logger.error('Bot pair start error:', err.message));
-
+    
+    // Send ID to frontend immediately
     res.json({ success: true, sessionId });
+
+    // Use helper to save session then start with phone number
+    await initAndStartBot(sessionId, req.session.userId, cleanNum);
+
   } catch (err) {
     logger.error('start-pair error:', err.message);
     res.status(500).json({ error: 'Failed to start pairing.' });
@@ -288,9 +309,11 @@ app.post('/api/bot/deploy', isAuth, isPaid, async (req, res) => {
   try {
     const { sessionId } = req.body;
     if (!validateSessionId(sessionId)) return res.status(400).json({ error: 'Invalid Session ID format.' });
+    
     const sess = await getSession(sessionId);
     if (!sess) return res.status(404).json({ error: 'Session not found. Please generate QR or pair code first.' });
     if (sess.userId !== req.session.userId) return res.status(403).json({ error: 'Unauthorized.' });
+    
     res.json({ success: true, message: 'Bot is deploying!', sessionId });
   } catch (err) {
     logger.error('deploy error:', err.message);
@@ -302,11 +325,14 @@ app.post('/api/bot/stop', isAuth, async (req, res) => {
   try {
     const { sessionId } = req.body;
     if (!sessionId) return res.status(400).json({ error: 'Session ID is required.' });
+    
     const sess = await getSession(sessionId);
     if (!sess) return res.status(404).json({ error: 'Session not found.' });
     if (sess.userId !== req.session.userId && !req.session.isAdmin)
       return res.status(403).json({ error: 'Unauthorized.' });
+    
     await stopBot(sessionId);
+    await updateSession(sessionId, { status: 'stopped' });
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: 'Failed to stop bot.' });
@@ -320,6 +346,7 @@ app.delete('/api/bot/:sessionId', isAuth, async (req, res) => {
     if (!sess) return res.status(404).json({ error: 'Session not found.' });
     if (sess.userId !== req.session.userId && !req.session.isAdmin)
       return res.status(403).json({ error: 'Unauthorized.' });
+    
     await stopBot(sessionId);
     await deleteSession(sessionId);
     res.json({ success: true });
@@ -335,10 +362,12 @@ app.post('/api/bot/mode', isAuth, async (req, res) => {
     if (!sessionId) return res.status(400).json({ error: 'Session ID is required.' });
     if (!['public', 'private'].includes(mode))
       return res.status(400).json({ error: 'Mode must be "public" or "private".' });
+    
     const sess = await getSession(sessionId);
     if (!sess) return res.status(404).json({ error: 'Session not found.' });
     if (sess.userId !== req.session.userId && !req.session.isAdmin)
       return res.status(403).json({ error: 'Unauthorized.' });
+    
     await setSessionMode(sessionId, mode);
     res.json({ success: true, mode });
   } catch (err) {
@@ -352,20 +381,18 @@ app.post('/api/bot/restart', isAuth, async (req, res) => {
   try {
     const { sessionId } = req.body;
     if (!sessionId) return res.status(400).json({ error: 'Session ID is required.' });
+    
     const sess = await getSession(sessionId);
     if (!sess) return res.status(404).json({ error: 'Session not found.' });
     if (sess.userId !== req.session.userId && !req.session.isAdmin)
       return res.status(403).json({ error: 'Unauthorized.' });
+    
     await stopBot(sessionId);
-    // Short delay then restart
-    setTimeout(() => {
-      startBot(
-        sessionId, sess.userId,
-        null, null,
-        (sid, number) => logger.success(`Bot ${sid} restarted as +${number}`),
-        (sid) => logger.warn(`Bot ${sid} disconnected after restart`),
-      ).catch(err => logger.error('Bot restart error:', err.message));
+    
+    setTimeout(async () => {
+      await initAndStartBot(sessionId, sess.userId, sess.phoneNumber);
     }, 2000);
+    
     res.json({ success: true, message: 'Bot is restarting...' });
   } catch (err) {
     logger.error('bot/restart error:', err.message);
@@ -467,7 +494,6 @@ app.get('/api/admin/live-bots', isAdmin, (req, res) => {
   res.json({ bots: getAllActiveBots() });
 });
 
-// BUG FIX: announcement admin routes were missing entirely
 app.post('/api/admin/announcements', isAdmin, async (req, res) => {
   try {
     const { title, message } = req.body;
@@ -521,8 +547,7 @@ app.use((req, res) => {
 });
 
 // ─── GLOBAL ERROR HANDLER ─────────────────────────────────
-// BUG FIX: must be declared with 4 params for Express to recognize it as error handler
-app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
+app.use((err, req, res, next) => {
   logger.error('Express error:', err.message);
   res.status(500).json({ error: 'Internal server error.' });
 });
@@ -538,7 +563,6 @@ server.listen(PORT, '0.0.0.0', () => {
 });
 
 // ─── GRACEFUL SHUTDOWN ────────────────────────────────────
-// BUG FIX: was missing — Railway sends SIGTERM on redeploy; without this, in-progress messages are lost
 process.on('SIGTERM', () => {
   logger.warn('SIGTERM received. Shutting down gracefully...');
   server.close(() => {

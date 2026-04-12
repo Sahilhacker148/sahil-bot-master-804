@@ -11,7 +11,7 @@
 // ── Dynamic Baileys Import (ESM inside CJS) ───────────────────
 let makeWASocket, DisconnectReason, useMultiFileAuthState,
     makeCacheableSignalKeyStore, isJidBroadcast, Browsers,
-    delay as baileysDelay;
+    baileysDelay;
 
 async function loadBaileys() {
   if (makeWASocket) return;
@@ -22,7 +22,7 @@ async function loadBaileys() {
   makeCacheableSignalKeyStore = B.makeCacheableSignalKeyStore;
   isJidBroadcast              = B.isJidBroadcast;
   Browsers                    = B.Browsers;
-  baileysDelay                = B.delay ?? ((ms) => new Promise(r => setTimeout(r, ms)));
+  baileysDelay                = B.delay ?? B.default?.delay ?? ((ms) => new Promise(r => setTimeout(r, ms)));
 }
 
 const path   = require('path');
@@ -385,3 +385,4 @@ function _cleanup(sessionId) {
 }
 
 module.exports = { startBot, stopBot };
+      

@@ -3,10 +3,9 @@
 // ════════════════════════════════════════════════════════════════
 //  SAHIL 804 BOT — launcher.js
 //  Developer : Legend Sahil Hacker 804
-//  FIXES APPLIED:
-//   1. defaultQueryTimeoutMs: undefined  (pair code "Connection Closed" on cloud fix)
-//   2. browser: exact string array       (pair code 428 error fix)
-//   3. pair code requested on qr event   (community confirmed working pattern)
+//  FIX: Pair code on 'connecting' event with delay — not on 'qr'
+//  When phoneNumber is provided, WA never fires qr event.
+//  Working pattern confirmed by itsliaaa/baileys (Feb 2026)
 // ════════════════════════════════════════════════════════════════
 
 let makeWASocket, DisconnectReason, useMultiFileAuthState,
@@ -48,6 +47,9 @@ const silentLogger = {
   child: () => silentLogger,
 };
 
+// Simple delay helper
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 async function startBot(
   sessionId, userId, onQR, onPairCode, onConnected, onDisconnected, phoneNumber = null,
 ) {
@@ -60,27 +62,13 @@ async function startBot(
 
   const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
-  let version;
-  try {
-    const result = await Promise.race([
-      fetchLatestBaileysVersion(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000)),
-    ]);
-    version = result.version;
-    logger.info(`[${sessionId}] WA version: ${version.join('.')}`);
-  } catch {
-    version = undefined;
-    logger.warn(`[${sessionId}] fetchLatestBaileysVersion failed — using default`);
-  }
-
-  // FIX 1: Exact browser string array required for pair code on cloud servers
-  // Browsers.macOS() helper generates wrong format that WhatsApp rejects with 428
+  // FIX: Do NOT use fetchLatestBaileysVersion — causes incompatibility
+  // Official docs: "not recommended to set the latest version on every connect"
   const browserConfig = phoneNumber
-    ? ['Mac OS', 'Chrome', '114.0.5735.198']
+    ? Browsers.macOS('Google Chrome')   // Official docs: use valid browser for pairing
     : Browsers.ubuntu('SAHIL 804 BOT');
 
   const sock = makeWASocket({
-    ...(version ? { version } : {}),
     auth: {
       creds: state.creds,
       keys:  makeCacheableSignalKeyStore(state.keys, silentLogger),
@@ -89,12 +77,11 @@ async function startBot(
     printQRInTerminal:              false,
     logger:                         silentLogger,
     connectTimeoutMs:               60_000,
-    defaultQueryTimeoutMs:          undefined,   // FIX 2: undefined = no timeout, fixes "Connection Closed" on cloud
+    defaultQueryTimeoutMs:          undefined,   // undefined = no timeout, required for cloud
     keepAliveIntervalMs:            25_000,
     retryRequestDelayMs:            2_000,
-    markOnlineOnConnect:            false,
+    markOnlineOnConnect:            false,        // false = phone gets notifications
     syncFullHistory:                false,
-    fireInitQueries:                false,
     generateHighQualityLinkPreview: true,
     shouldIgnoreJid: jid => isJidBroadcast(jid),
   });
@@ -104,8 +91,8 @@ async function startBot(
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    // QR code flow
-    if (qr) {
+    // ── QR CODE FLOW ──────────────────────────────────────────
+    if (qr && !phoneNumber) {
       const qCount = (qrAttempts.get(sessionId) || 0) + 1;
       qrAttempts.set(sessionId, qCount);
       if (qCount > MAX_QR_ATTEMPTS) {
@@ -116,26 +103,29 @@ async function startBot(
       }
       logger.info(`[${sessionId}] QR attempt ${qCount}/${MAX_QR_ATTEMPTS}`);
       if (onQR) onQR(qr);
+    }
 
-      // FIX 3: Request pair code inside qr event — this is the confirmed working pattern
-      // on cloud/Railway. The qr event fires when WA server is ready to accept pairing.
-      // Requesting pair code here (not on 'connecting') works reliably on all platforms.
-      if (phoneNumber && !sock.authState.creds.registered && !pairCodeSent.get(sessionId)) {
-        pairCodeSent.set(sessionId, true);
-        try {
-          const cleanNum = phoneNumber.replace(/[^0-9]/g, '');
-          if (cleanNum.length < 10) throw new Error('Phone number too short');
-          const code = await sock.requestPairingCode(cleanNum);
-          const formatted = code?.match(/.{1,4}/g)?.join('-') || code;
-          logger.info(`[${sessionId}] Pair code: ${formatted}`);
-          if (onPairCode) onPairCode(formatted);
-        } catch (err) {
-          logger.error(`[${sessionId}] Pair code error: ${err.message}`);
-          pairCodeSent.delete(sessionId);
-        }
+    // ── PAIR CODE FLOW ────────────────────────────────────────
+    // KEY FIX: When phoneNumber is given, WA fires 'connecting' — NOT 'qr'
+    // Must request pair code on 'connecting' state with a small delay
+    // This is the confirmed working pattern (itsliaaa/baileys Feb 2026)
+    if (connection === 'connecting' && phoneNumber && !sock.authState.creds.registered && !pairCodeSent.get(sessionId)) {
+      pairCodeSent.set(sessionId, true);
+      try {
+        await delay(1500); // wait for socket to fully handshake with WA server
+        const cleanNum = phoneNumber.replace(/[^0-9]/g, '');
+        if (cleanNum.length < 10) throw new Error('Phone number too short');
+        const code = await sock.requestPairingCode(cleanNum);
+        const formatted = code?.match(/.{1,4}/g)?.join('-') || code;
+        logger.info(`[${sessionId}] Pair code: ${formatted}`);
+        if (onPairCode) onPairCode(formatted);
+      } catch (err) {
+        logger.error(`[${sessionId}] Pair code error: ${err.message}`);
+        pairCodeSent.delete(sessionId);
       }
     }
 
+    // ── DISCONNECTED ──────────────────────────────────────────
     if (connection === 'close') {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const shouldReconnect = ![
@@ -167,11 +157,12 @@ async function startBot(
         return;
       }
 
-      const delay = Math.min(5_000 * Math.pow(2, attempts - 1), 60_000);
-      logger.info(`[${sessionId}] Reconnecting in ${delay / 1000}s (attempt ${attempts})…`);
-      setTimeout(() => startBot(sessionId, userId, onQR, onPairCode, onConnected, onDisconnected, null), delay);
+      const retryDelay = Math.min(5_000 * Math.pow(2, attempts - 1), 60_000);
+      logger.info(`[${sessionId}] Reconnecting in ${retryDelay / 1000}s (attempt ${attempts})…`);
+      setTimeout(() => startBot(sessionId, userId, onQR, onPairCode, onConnected, onDisconnected, null), retryDelay);
     }
 
+    // ── CONNECTED ─────────────────────────────────────────────
     if (connection === 'open') {
       reconnectAttempts.delete(sessionId);
       pairCodeSent.delete(sessionId);

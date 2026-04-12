@@ -228,15 +228,14 @@ app.get('/api/announcement', async (req, res) => {
   }
 });
 
-// ─── BOT ROUTES (FIXED) ───────────────────────────────────────
+// ─── BOT ROUTES ───────────────────────────────────────────────
 // Helper: Initialize Session in DB then Start Bot
 async function initAndStartBot(sessionId, userId, phoneNumber = null) {
-  // 1. SAVE TO FIRESTORE FIRST (Critical Fix)
-  await createSession(sessionId, userId, {
-    status: 'connecting',
-    createdAt: new Date().toISOString(),
-    phoneNumber: phoneNumber || null
-  });
+  // BUG FIX: createSession(sessionId, userId, whatsappNumber) — 3rd arg must be
+  // a string (whatsappNumber), NOT an object. Passing an object crashed Firestore
+  // batch silently, causing startBot() to never be called → no QR/pair code ever.
+  // We pass null here (number not known yet), launcher updates it on connect.
+  await createSession(sessionId, userId, phoneNumber || null);
 
   // 2. Start Bot
   startBot(

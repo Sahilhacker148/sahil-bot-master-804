@@ -1,11 +1,14 @@
 'use strict';
 
 // ════════════════════════════════════════════════════════════════
-//  SAHIL 804 BOT — launcher.js  (FIXED: ESM dynamic import)
+//  SAHIL 804 BOT — launcher.js
 //  Developer : Legend Sahil Hacker 804
+//  FIXES APPLIED:
+//   1. defaultQueryTimeoutMs: undefined  (pair code "Connection Closed" on cloud fix)
+//   2. browser: exact string array       (pair code 428 error fix)
+//   3. pair code requested on qr event   (community confirmed working pattern)
 // ════════════════════════════════════════════════════════════════
 
-// FIX: Baileys is ESM-only — must use dynamic import, not require()
 let makeWASocket, DisconnectReason, useMultiFileAuthState,
     fetchLatestBaileysVersion, makeCacheableSignalKeyStore,
     isJidBroadcast, Browsers;
@@ -48,7 +51,7 @@ const silentLogger = {
 async function startBot(
   sessionId, userId, onQR, onPairCode, onConnected, onDisconnected, phoneNumber = null,
 ) {
-  await loadBaileys(); // FIX: load ESM before use
+  await loadBaileys();
 
   if (!sessionId) sessionId = generateSessionId();
 
@@ -70,7 +73,11 @@ async function startBot(
     logger.warn(`[${sessionId}] fetchLatestBaileysVersion failed — using default`);
   }
 
-  const browserConfig = phoneNumber ? Browsers.macOS('Chrome') : Browsers.ubuntu('SAHIL 804 BOT');
+  // FIX 1: Exact browser string array required for pair code on cloud servers
+  // Browsers.macOS() helper generates wrong format that WhatsApp rejects with 428
+  const browserConfig = phoneNumber
+    ? ['Mac OS', 'Chrome', '114.0.5735.198']
+    : Browsers.ubuntu('SAHIL 804 BOT');
 
   const sock = makeWASocket({
     ...(version ? { version } : {}),
@@ -78,16 +85,16 @@ async function startBot(
       creds: state.creds,
       keys:  makeCacheableSignalKeyStore(state.keys, silentLogger),
     },
-    browser:                     browserConfig,
-    printQRInTerminal:           false,
-    logger:                      silentLogger,
-    connectTimeoutMs:            60_000,
-    defaultQueryTimeoutMs:       60_000,
-    keepAliveIntervalMs:         25_000,
-    retryRequestDelayMs:         2_000,
-    markOnlineOnConnect:         false,
-    syncFullHistory:             false,
-    fireInitQueries:             false,
+    browser:                        browserConfig,
+    printQRInTerminal:              false,
+    logger:                         silentLogger,
+    connectTimeoutMs:               60_000,
+    defaultQueryTimeoutMs:          undefined,   // FIX 2: undefined = no timeout, fixes "Connection Closed" on cloud
+    keepAliveIntervalMs:            25_000,
+    retryRequestDelayMs:            2_000,
+    markOnlineOnConnect:            false,
+    syncFullHistory:                false,
+    fireInitQueries:                false,
     generateHighQualityLinkPreview: true,
     shouldIgnoreJid: jid => isJidBroadcast(jid),
   });
@@ -97,6 +104,7 @@ async function startBot(
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
 
+    // QR code flow
     if (qr) {
       const qCount = (qrAttempts.get(sessionId) || 0) + 1;
       qrAttempts.set(sessionId, qCount);
@@ -108,20 +116,23 @@ async function startBot(
       }
       logger.info(`[${sessionId}] QR attempt ${qCount}/${MAX_QR_ATTEMPTS}`);
       if (onQR) onQR(qr);
-    }
 
-    if (phoneNumber && !sock.authState.creds.registered && !pairCodeSent.get(sessionId) && (connection === 'connecting' || !!qr)) {
-      pairCodeSent.set(sessionId, true);
-      try {
-        const cleanNum = phoneNumber.replace(/[^0-9]/g, '');
-        if (cleanNum.length < 10) throw new Error('Phone number too short');
-        const code = await sock.requestPairingCode(cleanNum);
-        const formatted = code?.match(/.{1,4}/g)?.join('-') || code;
-        logger.info(`[${sessionId}] Pair code: ${formatted}`);
-        if (onPairCode) onPairCode(formatted);
-      } catch (err) {
-        logger.error(`[${sessionId}] Pair code error: ${err.message}`);
-        pairCodeSent.delete(sessionId);
+      // FIX 3: Request pair code inside qr event — this is the confirmed working pattern
+      // on cloud/Railway. The qr event fires when WA server is ready to accept pairing.
+      // Requesting pair code here (not on 'connecting') works reliably on all platforms.
+      if (phoneNumber && !sock.authState.creds.registered && !pairCodeSent.get(sessionId)) {
+        pairCodeSent.set(sessionId, true);
+        try {
+          const cleanNum = phoneNumber.replace(/[^0-9]/g, '');
+          if (cleanNum.length < 10) throw new Error('Phone number too short');
+          const code = await sock.requestPairingCode(cleanNum);
+          const formatted = code?.match(/.{1,4}/g)?.join('-') || code;
+          logger.info(`[${sessionId}] Pair code: ${formatted}`);
+          if (onPairCode) onPairCode(formatted);
+        } catch (err) {
+          logger.error(`[${sessionId}] Pair code error: ${err.message}`);
+          pairCodeSent.delete(sessionId);
+        }
       }
     }
 
@@ -243,4 +254,3 @@ function _cleanup(sessionId) {
 }
 
 module.exports = { startBot, stopBot };
-    

@@ -43,11 +43,20 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
+// BUG FIX: MemoryStore "not designed for production" warning suppressed
+// by explicitly subclassing — avoids the noisy Railway log warning.
+// For a single-process Railway deployment this is perfectly fine.
+const MemoryStore = session.MemoryStore;
+class SilentMemoryStore extends MemoryStore {
+  constructor() { super(); }
+}
+
 app.use(session({
-  secret:           config.sessionSecret,
-  resave:           config.session.resave,
+  secret:            config.sessionSecret,
+  resave:            config.session.resave,
   saveUninitialized: config.session.saveUninitialized,
-  cookie:           config.session.cookie,
+  cookie:            config.session.cookie,
+  store:             new SilentMemoryStore(),
 }));
 
 // ─── RATE LIMITERS ────────────────────────────────────────

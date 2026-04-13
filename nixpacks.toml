@@ -1,8 +1,7 @@
 # Railway / Nixpacks build config
-# Forces a clean npm ci (not cached) so postinstall patches always run
 
 [phases.install]
-cmds = ["npm ci --omit=dev"]
+cmds = ["npm install --omit=dev"]
 
 [phases.build]
 cmds = ["node scripts/patch-baileys.js"]

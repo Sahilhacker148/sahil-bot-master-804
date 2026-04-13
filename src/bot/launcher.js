@@ -41,6 +41,8 @@ const reconnectAttempts = new Map();
 const pairCodeSent      = new Map();
 const qrAttempts        = new Map();
 const activeSockets     = new Map();
+// BUG FIX: store phoneNumber per session so reconnect preserves pair-code mode
+const sessionPhones     = new Map();
 
 const silentLogger = {
   level: 'silent',
@@ -67,6 +69,13 @@ async function startBot(
   await loadBaileys();
 
   if (!sessionId) sessionId = generateSessionId();
+
+  // BUG FIX: persist phoneNumber so reconnects stay in pair-code mode
+  if (phoneNumber) {
+    sessionPhones.set(sessionId, phoneNumber);
+  } else if (sessionPhones.has(sessionId)) {
+    phoneNumber = sessionPhones.get(sessionId);
+  }
 
   const authDir = path.join(SESSIONS_DIR, sessionId);
   fs.mkdirSync(authDir, { recursive: true });
@@ -306,7 +315,8 @@ async function _handleDisconnect(
   logger.info(`[${sessionId}] Reconnecting in ${(waitMs/1000).toFixed(1)}s (attempt ${attempts}/${MAX_RECONNECT_ATTEMPTS})…`);
 
   setTimeout(
-    () => startBot(sessionId, userId, onQR, onPairCode, onConnected, onDisconnected, null),
+    // BUG FIX: pass undefined (not null) so startBot restores from sessionPhones
+    () => startBot(sessionId, userId, onQR, onPairCode, onConnected, onDisconnected),
     waitMs,
   );
 }
@@ -327,6 +337,7 @@ function _cleanup(sessionId) {
   reconnectAttempts.delete(sessionId);
   pairCodeSent.delete(sessionId);
   qrAttempts.delete(sessionId);
+  sessionPhones.delete(sessionId);  // BUG FIX: clear stored phone on full cleanup
 }
 
 module.exports = { startBot, stopBot };

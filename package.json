@@ -5,7 +5,8 @@
   "main": "web/server.js",
   "scripts": {
     "start": "node web/server.js",
-    "dev": "nodemon web/server.js"
+    "dev": "nodemon web/server.js",
+    "postinstall": "node scripts/patch-baileys.js"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.21",

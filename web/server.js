@@ -263,14 +263,19 @@ async function initAndStartBot(sessionId, userId, phoneNumber = null) {
 app.post('/api/bot/start-qr', isAuth, isPaid, async (req, res) => {
   try {
     const sessionId = generateSessionId();
+    // BUG FIX: same as start-pair — send response before fire-and-forget
     res.json({ success: true, sessionId });
-    
-    // Use helper
-    await initAndStartBot(sessionId, req.session.userId);
-    
+
+    initAndStartBot(sessionId, req.session.userId).catch(err => {
+      logger.error('start-qr initAndStartBot error:', err.message);
+      wsSend(sessionId, { type: 'error', message: 'Failed to initialize bot. Please try again.' });
+    });
+
   } catch (err) {
     logger.error('start-qr error:', err.message);
-    res.status(500).json({ error: 'Failed to start bot.' });
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Failed to start bot.' });
+    }
   }
 });
 
@@ -284,14 +289,23 @@ app.post('/api/bot/start-pair', isAuth, isPaid, async (req, res) => {
 
     const sessionId = generateSessionId();
     
+    // BUG FIX: Send response FIRST, then start bot fire-and-forget
+    // Previously: res.json() + await initAndStartBot() in same try block
+    // Problem: if initAndStartBot threw, catch block tried to res.status(500) on already-sent headers
     res.json({ success: true, sessionId });
 
-    // Use helper with phone number
-    await initAndStartBot(sessionId, req.session.userId, cleanNum);
+    // Fire-and-forget: errors sent to client via WebSocket, not HTTP
+    initAndStartBot(sessionId, req.session.userId, cleanNum).catch(err => {
+      logger.error('start-pair initAndStartBot error:', err.message);
+      wsSend(sessionId, { type: 'error', message: 'Failed to initialize bot. Please try again.' });
+    });
 
   } catch (err) {
     logger.error('start-pair error:', err.message);
-    res.status(500).json({ error: 'Failed to start pairing.' });
+    // Only send HTTP error if response not yet sent
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Failed to start pairing.' });
+    }
   }
 });
 
@@ -378,15 +392,20 @@ app.post('/api/bot/restart', isAuth, async (req, res) => {
       return res.status(403).json({ error: 'Unauthorized.' });
     
     await stopBot(sessionId);
-    
-    setTimeout(async () => {
-       await initAndStartBot(sessionId, sess.userId, sess.phoneNumber);
-    }, 2000);
-    
     res.json({ success: true, message: 'Bot is restarting...' });
+
+    // BUG FIX: fire-and-forget — response already sent above
+    setTimeout(async () => {
+      initAndStartBot(sessionId, sess.userId, sess.phoneNumber).catch(err => {
+        logger.error(`restart initAndStartBot [${sessionId}]:`, err.message);
+      });
+    }, 2000);
+
   } catch (err) {
     logger.error('bot/restart error:', err.message);
-    res.status(500).json({ error: 'Failed to restart bot.' });
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Failed to restart bot.' });
+    }
   }
 });
 

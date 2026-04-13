@@ -468,16 +468,39 @@ function openWS(sid) {
   if (ws) ws.close();
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}?sessionId=${sid}`);
+
+  // BUG FIX: Connection timeout — if no pair code / QR in 90s, show retry UI
+  let connectionTimer = setTimeout(() => {
+    if (ws) { ws.close(); ws = null; }
+    _showConnectError('WhatsApp connection timed out. Please try again.');
+  }, 90000);
+
   ws.onmessage = (e) => {
-    const msg = JSON.parse(e.data);
+    let msg;
+    try { msg = JSON.parse(e.data); } catch (_) { return; }
+
+    clearTimeout(connectionTimer);
+
     if (msg.type === 'qr') {
       document.getElementById('connectingMsg').style.display = 'none';
       document.getElementById('qrBox').innerHTML =
         `<img src="${msg.qr}" alt="QR Code" /><p style="color:var(--muted);margin-top:12px;font-size:0.85rem">Scan with WhatsApp → Linked Devices</p>`;
+      // Reset timeout for next QR refresh
+      connectionTimer = setTimeout(() => {
+        if (ws) { ws.close(); ws = null; }
+        _showConnectError('QR code expired. Please close and try again.');
+      }, 60000);
+
     } else if (msg.type === 'pairCode') {
       document.getElementById('connectingMsg').style.display = 'none';
+      // BUG FIX: null code check — show error instead of "null"
+      if (!msg.code) {
+        _showConnectError('Failed to generate pair code. Please close and try again.');
+        return;
+      }
       document.getElementById('pairResult').style.display = 'block';
       document.getElementById('pairCodeText').textContent = msg.code;
+
     } else if (msg.type === 'connected') {
       document.getElementById('qrBox').innerHTML = '';
       document.getElementById('pairResult').style.display = 'none';
@@ -486,11 +509,50 @@ function openWS(sid) {
       document.getElementById('connectedNumber').textContent = 'Connected as: +' + msg.number;
       loadBots();
       if (ws) { ws.close(); ws = null; }
+
     } else if (msg.type === 'disconnected') {
       showToast('Bot disconnected from WhatsApp.', true);
+
+    } else if (msg.type === 'error') {
+      // BUG FIX: new error type from server — show actionable message
+      _showConnectError(msg.message || 'An error occurred. Please try again.');
     }
   };
-  ws.onerror = () => showToast('Connection error. Please refresh and try again.', true);
+
+  // BUG FIX: onclose handler was missing — UI would freeze if server closed socket
+  ws.onclose = (e) => {
+    clearTimeout(connectionTimer);
+    ws = null;
+    // Only show error if not already connected/closed intentionally
+    const success = document.getElementById('successMsg').style.display !== 'none';
+    if (!success) {
+      const modal = document.getElementById('deployModal');
+      if (modal && modal.classList.contains('show')) {
+        const connecting = document.getElementById('connectingMsg').style.display !== 'none';
+        if (connecting) {
+          _showConnectError('Connection lost. Please close and try again.');
+        }
+      }
+    }
+  };
+
+  ws.onerror = () => {
+    clearTimeout(connectionTimer);
+    showToast('WebSocket error. Please refresh and try again.', true);
+  };
+}
+
+// BUG FIX: helper to show actionable error inside the connecting area
+function _showConnectError(message) {
+  const el = document.getElementById('connectingMsg');
+  if (el) {
+    el.innerHTML = `
+      <div style="font-size:2rem">❌</div>
+      <p style="color:var(--red);margin-top:8px;font-size:0.9rem;font-weight:600">${message}</p>
+      <button class="btn btn-green" style="margin-top:16px;width:100%" onclick="openDeploy()">🔄 Try Again</button>
+    `;
+    el.style.display = 'block';
+  }
 }
 
 async function showPayment() {

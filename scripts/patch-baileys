@@ -1,0 +1,119 @@
+#!/usr/bin/env node
+// ════════════════════════════════════════════════════════════════
+//  patch-baileys.js — Applies Baileys RC9 auth fixes
+//  Fixes from GitHub Issue #19907 (Ron at FlyTech)
+//  Safe to run on any Baileys version (idempotent)
+// ════════════════════════════════════════════════════════════════
+'use strict';
+
+const fs   = require('fs');
+const path = require('path');
+
+// ── Find Baileys in possible locations ───────────────────────────
+const SEARCH_PATHS = [
+  path.join(process.cwd(), 'node_modules', '@whiskeysockets', 'baileys', 'lib'),
+  path.join(__dirname, '..', 'node_modules', '@whiskeysockets', 'baileys', 'lib'),
+  path.join('/usr/lib/node_modules/openclaw/node_modules/@whiskeysockets/baileys/lib'),
+];
+
+function findBaileys() {
+  for (const p of SEARCH_PATHS) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+// ── Patch 1: passive: true → passive: false ──────────────────────
+// WhatsApp interprets passive:true as a listener → 401 device_removed
+function patchPassive(vcFile) {
+  let content = fs.readFileSync(vcFile, 'utf8');
+  if (!content.includes('passive: true')) {
+    console.log('  [SKIP] passive patch — already applied or not needed');
+    return false;
+  }
+  content = content.replace(/passive:\s*true/g, 'passive: false');
+  fs.writeFileSync(vcFile, content);
+  console.log('  [OK] passive: true → passive: false');
+  return true;
+}
+
+// ── Patch 2: Remove lidDbMigrated field ──────────────────────────
+// Unknown field rejected by WhatsApp server protocol
+function patchLidDbMigrated(vcFile) {
+  let content = fs.readFileSync(vcFile, 'utf8');
+  if (!content.includes('lidDbMigrated')) {
+    console.log('  [SKIP] lidDbMigrated patch — already applied or not needed');
+    return false;
+  }
+  // Remove the line containing lidDbMigrated (handles different whitespace)
+  content = content.replace(/^.*lidDbMigrated.*$\n?/gm, '');
+  fs.writeFileSync(vcFile, content);
+  console.log('  [OK] lidDbMigrated field removed');
+  return true;
+}
+
+// ── Patch 3: Remove await from noise.finishInit() ─────────────────
+// Race condition: keep-alive fires before noise handshake is committed
+function patchNoiseFinishInit(socketFile) {
+  let content = fs.readFileSync(socketFile, 'utf8');
+  if (!content.includes('await noise.finishInit()')) {
+    console.log('  [SKIP] noise.finishInit patch — already applied or not needed');
+    return false;
+  }
+  content = content.replace(/await\s+noise\.finishInit\(\)/g, 'noise.finishInit()');
+  fs.writeFileSync(socketFile, content);
+  console.log('  [OK] await noise.finishInit() → noise.finishInit()');
+  return true;
+}
+
+// ── Main ──────────────────────────────────────────────────────────
+function main() {
+  console.log('\n🔧 Baileys RC9 Auth Patcher (Issue #19907)');
+  console.log('════════════════════════════════════════════');
+
+  const baileys = findBaileys();
+  if (!baileys) {
+    console.log('⚠️  Baileys not installed yet — patches will apply after npm install');
+    console.log('   (This is normal during first install — re-run after node_modules exists)');
+    process.exit(0);
+  }
+
+  console.log(`📦 Found Baileys at: ${baileys}\n`);
+
+  const vcFile     = path.join(baileys, 'Utils', 'validate-connection.js');
+  const socketFile = path.join(baileys, 'Socket', 'socket.js');
+
+  // Backup originals (only once)
+  for (const [src, bak] of [[vcFile, vcFile + '.orig'], [socketFile, socketFile + '.orig']]) {
+    if (fs.existsSync(src) && !fs.existsSync(bak)) {
+      fs.copyFileSync(src, bak);
+      console.log(`  💾 Backup: ${path.basename(bak)}`);
+    }
+  }
+
+  console.log('\n🔨 Applying patches to validate-connection.js:');
+  let p1 = false, p2 = false, p3 = false;
+
+  if (fs.existsSync(vcFile)) {
+    p1 = patchPassive(vcFile);
+    p2 = patchLidDbMigrated(vcFile);
+  } else {
+    console.log('  ⚠️  validate-connection.js not found — skipping patches 1 & 2');
+  }
+
+  console.log('\n🔨 Applying patches to socket.js:');
+  if (fs.existsSync(socketFile)) {
+    p3 = patchNoiseFinishInit(socketFile);
+  } else {
+    console.log('  ⚠️  socket.js not found — skipping patch 3');
+  }
+
+  const applied = [p1, p2, p3].filter(Boolean).length;
+  console.log(`\n✅ Done! ${applied}/3 patches applied.`);
+  if (applied === 0) {
+    console.log('   All patches were already applied or this is not RC9 — no changes needed.');
+  }
+  console.log('════════════════════════════════════════════\n');
+}
+
+main();

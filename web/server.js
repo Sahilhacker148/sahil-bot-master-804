@@ -1,4 +1,64 @@
 require('dotenv').config();
+
+// ════════════════════════════════════════════════════════════════
+//  BAILEYS RC9 PATCHES — Applied at startup (Issue #19907)
+//  Must run BEFORE Baileys is imported anywhere in the process
+// ════════════════════════════════════════════════════════════════
+(function patchBaileysRC9() {
+  const fs   = require('fs');
+  const path = require('path');
+
+  const BAILEYS = path.join(process.cwd(), 'node_modules', '@whiskeysockets', 'baileys', 'lib');
+  if (!fs.existsSync(BAILEYS)) {
+    console.log('[PATCH] Baileys not found — skipping RC9 patches');
+    return;
+  }
+
+  const vcFile     = path.join(BAILEYS, 'Utils', 'validate-connection.js');
+  const socketFile = path.join(BAILEYS, 'Socket', 'socket.js');
+  let applied = 0;
+
+  try {
+    if (fs.existsSync(vcFile)) {
+      let vc = fs.readFileSync(vcFile, 'utf8');
+      let changed = false;
+
+      if (vc.includes('passive: true')) {
+        vc = vc.replace(/passive:\s*true/g, 'passive: false');
+        changed = true;
+        console.log('[PATCH] ✅ passive: true → false');
+        applied++;
+      }
+      if (vc.includes('lidDbMigrated')) {
+        vc = vc.replace(/^.*lidDbMigrated.*$\n?/gm, '');
+        changed = true;
+        console.log('[PATCH] ✅ lidDbMigrated removed');
+        applied++;
+      }
+      if (changed) fs.writeFileSync(vcFile, vc);
+    }
+
+    if (fs.existsSync(socketFile)) {
+      let sk = fs.readFileSync(socketFile, 'utf8');
+      if (sk.includes('await noise.finishInit()')) {
+        sk = sk.replace(/await\s+noise\.finishInit\(\)/g, 'noise.finishInit()');
+        fs.writeFileSync(socketFile, sk);
+        console.log('[PATCH] ✅ await noise.finishInit() → noise.finishInit()');
+        applied++;
+      }
+    }
+
+    if (applied === 0) {
+      console.log('[PATCH] Baileys RC9 patches already applied or not needed.');
+    } else {
+      console.log(`[PATCH] ${applied} patch(es) applied to Baileys.`);
+    }
+  } catch (err) {
+    console.error('[PATCH] Error applying Baileys patches:', err.message);
+  }
+})();
+// ════════════════════════════════════════════════════════════════
+
 const express  = require('express');
 const session  = require('express-session');
 const helmet   = require('helmet');

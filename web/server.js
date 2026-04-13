@@ -87,6 +87,8 @@ const {
   getActiveAnnouncement, createAnnouncement, deactivateAnnouncement,
 } = require('../src/firebase/config');
 const { startBot, stopBot } = require('../src/bot/launcher');
+const pairRoute = require('../pair');
+const qrRoute   = require('../qr');
 
 const app    = express();
 const server = http.createServer(app);
@@ -102,6 +104,11 @@ app.use(helmet({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
+
+// ─── SESSION GENERATOR ROUTES ─────────────────────────────
+app.use('/code', pairRoute);
+app.use('/qr',   qrRoute);
+app.use('/pair', (req, res) => res.sendFile(path.join(__dirname, 'public', 'pair.html')));
 
 // BUG FIX: MemoryStore "not designed for production" warning suppressed
 // by explicitly subclassing — avoids the noisy Railway log warning.
@@ -509,154 +516,4 @@ app.get('/api/admin/users', isAdmin, async (req, res) => {
 });
 
 app.post('/api/admin/users/:uid/approve', isAdmin, async (req, res) => {
-  try { await approveUser(req.params.uid); res.json({ success: true }); }
-  catch (err) { res.status(500).json({ error: 'Failed to approve user.' }); }
-});
-
-app.post('/api/admin/users/:uid/reject', isAdmin, async (req, res) => {
-  try { await rejectUser(req.params.uid); res.json({ success: true }); }
-  catch (err) { res.status(500).json({ error: 'Failed to reject user.' }); }
-});
-
-app.delete('/api/admin/users/:uid', isAdmin, async (req, res) => {
-  try { await deleteUser(req.params.uid); res.json({ success: true }); }
-  catch (err) { res.status(500).json({ error: 'Failed to delete user.' }); }
-});
-
-app.post('/api/admin/subscriptions/:uid', isAdmin, async (req, res) => {
-  try {
-    const { plan } = req.body;
-    if (!['monthly', 'yearly'].includes(plan))
-      return res.status(400).json({ error: 'Invalid plan. Use: monthly or yearly' });
-    await assignSubscription(req.params.uid, plan);
-    res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: 'Failed to assign subscription.' }); }
-});
-
-app.delete('/api/admin/subscriptions/:uid', isAdmin, async (req, res) => {
-  try { await revokeSubscription(req.params.uid); res.json({ success: true }); }
-  catch (err) { res.status(500).json({ error: 'Failed to revoke subscription.' }); }
-});
-
-app.get('/api/admin/sessions', isAdmin, async (req, res) => {
-  try {
-    const sessions = await getAllSessions();
-    const liveBots = getAllActiveBots();
-    const enriched = sessions.map(s => ({
-      ...s,
-      isLive: liveBots.some(b => b.sessionId === s.sessionId),
-    }));
-    res.json({ sessions: enriched });
-  } catch (err) { res.status(500).json({ error: 'Failed to fetch sessions.' }); }
-});
-
-app.delete('/api/admin/sessions/:sessionId', isAdmin, async (req, res) => {
-  try {
-    await stopBot(req.params.sessionId);
-    await deleteSession(req.params.sessionId);
-    res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: 'Failed to delete session.' }); }
-});
-
-app.get('/api/admin/payment-settings', isAdmin, async (req, res) => {
-  try { res.json(await getPaymentSettings()); }
-  catch (err) { res.status(500).json({ error: 'Failed to fetch payment settings.' }); }
-});
-
-app.post('/api/admin/payment-settings', isAdmin, async (req, res) => {
-  try { await updatePaymentSettings(req.body); res.json({ success: true }); }
-  catch (err) { res.status(500).json({ error: 'Failed to update payment settings.' }); }
-});
-
-app.get('/api/admin/live-bots', isAdmin, (req, res) => {
-  res.json({ bots: getAllActiveBots() });
-});
-
-app.post('/api/admin/announcements', isAdmin, async (req, res) => {
-  try {
-    const { title, message } = req.body;
-    if (!title || !message) return res.status(400).json({ error: 'Title and message are required.' });
-    const id = await createAnnouncement(title, message, config.admin.email);
-    res.json({ success: true, id });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to create announcement.' });
-  }
-});
-
-app.delete('/api/admin/announcements/:id', isAdmin, async (req, res) => {
-  try {
-    await deactivateAnnouncement(req.params.id);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to deactivate announcement.' });
-  }
-});
-
-// ─── PUBLIC ROUTES ────────────────────────────────────────
-app.get('/api/payment-info', async (req, res) => {
-  try {
-    const s = await getPaymentSettings();
-    res.json({
-      jazzcash:     s.jazzcash,
-      easypaisa:    s.easypaisa,
-      monthlyPrice: s.monthlyPrice,
-      yearlyPrice:  s.yearlyPrice,
-      currency:     s.currency,
-      instructions: s.instructions,
-    });
-  } catch (err) { res.status(500).json({ error: 'Failed to fetch payment info.' }); }
-});
-
-// ─── HEALTH CHECK ─────────────────────────────────────────
-app.get('/health', (req, res) => res.json({
-  status:    'ok',
-  bot:       config.bot.name,
-  version:   config.bot.version,
-  uptime:    process.uptime(),
-  memory:    process.memoryUsage(),
-  liveBots:  getAllActiveBots().length,
-  timestamp: new Date().toISOString(),
-}));
-
-// ─── 404 HANDLER ──────────────────────────────────────────
-app.use((req, res) => {
-  if (req.path.startsWith('/api/')) return res.status(404).json({ error: 'API route not found.' });
-  res.status(404).sendFile(path.join(__dirname, 'public', 'index.html'));
-});
-
-// ─── GLOBAL ERROR HANDLER ─────────────────────────────────
-app.use((err, req, res, next) => {
-  logger.error('Express error:', err.message);
-  res.status(500).json({ error: 'Internal server error.' });
-});
-
-// ─── START SERVER (FIXED FOR RAILWAY/RENDER) ───────────────────
-// FIX: Use process.env.PORT first to fix "Service Unavailable" error
-const PORT = process.env.PORT || config.port || 3000;
-
-server.listen(PORT, '0.0.0.0', () => {
-  logger.success(`╔══════════════════════════════╗`);
-  logger.success(`║  🤖 SAHIL 804 BOT SERVER     ║`);
-  logger.success(`║  🌐 Port: ${PORT}               ║`);
-  logger.success(`║  👑 Sahil Hacker 804          ║`);
-  logger.success(`╚══════════════════════════════╝`);
-});
-
-// ─── GRACEFUL SHUTDOWN ────────────────────────────────────
-process.on('SIGTERM', () => {
-  logger.warn('SIGTERM received. Shutting down gracefully...');
-  server.close(() => {
-    logger.info('HTTP server closed.');
-    process.exit(0);
-  });
-});
-
-process.on('uncaughtException', (err) => {
-  logger.error('Uncaught Exception:', err.message);
-});
-
-process.on('unhandledRejection', (reason) => {
-  logger.error('Unhandled Promise Rejection:', reason);
-});
-
-module.exports = app;
+  try { await approveUser(req.params.uid); res.json({ success: true 
